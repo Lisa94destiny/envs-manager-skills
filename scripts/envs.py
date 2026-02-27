@@ -2,15 +2,18 @@
 """
 envs - Claude Code 环境变量管理器
 管理 Claude Code 的环境变量，轻松切换不同模型配置
+API Key 存储在系统密钥库（macOS Keychain / Linux SecretService / Windows Credential Manager）
 """
 
 import json
 import os
 import platform
+import subprocess
 import sys
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".claude-code-env.json"
+KEYCHAIN_SERVICE = "envs-manager-claude-code"
 
 # ANSI 颜色
 RESET  = "\033[0m"
@@ -37,10 +40,81 @@ DEFAULT_CONFIG = {
 IMPORT_TEMPLATE = {
     "name": "模型别名（如 kimi、qwen、glm）",
     "ANTHROPIC_BASE_URL": "API 的 base URL（如 https://api.siliconflow.cn/v1）",
-    "ANTHROPIC_AUTH_TOKEN": "你的 API Key",
     "ANTHROPIC_MODEL": "模型 ID（可选，如 moonshotai/Kimi-K2-Instruct）",
     "description": "备注（可选）"
 }
+
+
+# ── 系统密钥库（Keychain）────────────────────────────────────────────────────
+
+def _key_get(name: str) -> str:
+    """从系统密钥库读取 API Key，不会输出到终端"""
+    # 优先用 keyring 库（跨平台：macOS/Linux/Windows）
+    try:
+        import keyring
+        return keyring.get_password(KEYCHAIN_SERVICE, name) or ""
+    except ImportError:
+        pass
+    # macOS 内置 security 命令（无需额外安装）
+    if platform.system() == "Darwin":
+        try:
+            r = subprocess.run(
+                ["security", "find-generic-password",
+                 "-a", KEYCHAIN_SERVICE, "-s", name, "-w"],
+                capture_output=True, text=True
+            )
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            pass
+    return ""
+
+
+def _key_set(name: str, key: str) -> None:
+    """把 API Key 存入系统密钥库"""
+    try:
+        import keyring
+        keyring.set_password(KEYCHAIN_SERVICE, name, key)
+        return
+    except ImportError:
+        pass
+    if platform.system() == "Darwin":
+        # 先删除旧条目（忽略错误）
+        subprocess.run(
+            ["security", "delete-generic-password",
+             "-a", KEYCHAIN_SERVICE, "-s", name],
+            capture_output=True
+        )
+        r = subprocess.run(
+            ["security", "add-generic-password",
+             "-a", KEYCHAIN_SERVICE, "-s", name, "-w", key],
+            capture_output=True, text=True
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"写入 Keychain 失败：{r.stderr.strip()}")
+        return
+    raise RuntimeError(
+        "未找到可用的密钥库。请安装 keyring：pip3 install keyring\n"
+        "  或在 macOS 上使用内置 Keychain（应已支持）"
+    )
+
+
+def _key_delete(name: str) -> None:
+    """从系统密钥库删除 API Key"""
+    try:
+        import keyring
+        try:
+            keyring.delete_password(KEYCHAIN_SERVICE, name)
+        except Exception:
+            pass
+        return
+    except ImportError:
+        pass
+    if platform.system() == "Darwin":
+        subprocess.run(
+            ["security", "delete-generic-password",
+             "-a", KEYCHAIN_SERVICE, "-s", name],
+            capture_output=True
+        )
 
 
 # ── 配置读写 ──────────────────────────────────────────────────────────────────
@@ -81,7 +155,6 @@ def detect_shell() -> tuple[str, Path]:
     elif "fish" in shell_env:
         return "fish", Path.home() / ".config" / "fish" / "config.fish"
     else:
-        # bash fallback
         bashrc = Path.home() / ".bashrc"
         bash_profile = Path.home() / ".bash_profile"
         return "bash", bashrc if bashrc.exists() else bash_profile
@@ -89,7 +162,7 @@ def detect_shell() -> tuple[str, Path]:
 
 def _shell_function_content(shell: str, envs_py_path: str) -> str:
     """生成对应 shell 的 envs() 函数内容"""
-    p = envs_py_path.replace("'", "\\'")  # escape single quotes
+    p = envs_py_path.replace("'", "\\'")
 
     if shell in ("zsh", "bash"):
         return f"""
@@ -169,19 +242,15 @@ def cmd_setup(envs_py_path: str | None = None) -> None:
     shell, config_file = detect_shell()
     marker = "# envs - Claude Code Env Manager"
 
-    # 使用传入路径，或者默认用本文件自身的路径
     py_path = envs_py_path or str(Path(__file__).resolve())
 
     print(f"\n{BOLD}■ envs 终端集成安装{RESET}")
     print(f"  检测到: {shell}  →  {config_file}\n")
 
-    # 确保父目录存在（fish config 目录可能不存在）
     config_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # 检查是否已安装
     if config_file.exists() and marker in config_file.read_text(encoding="utf-8"):
         existing = config_file.read_text(encoding="utf-8")
-        # 提取当前嵌入的脚本路径，检查是否有效
         import re as _re
         m = _re.search(r"python3 '([^']+)' --autoload", existing)
         embedded_path = m.group(1) if m else ""
@@ -190,7 +259,6 @@ def cmd_setup(envs_py_path: str | None = None) -> None:
             return
         # 路径无效或需要更新 → 替换旧块
         new_block = _shell_function_content(shell, py_path).lstrip("\n")
-        # 找到旧块起止位置并替换
         start = existing.find(marker)
         end_marker_str = "_envs_autoload\n"
         end_idx = existing.find(end_marker_str, start)
@@ -198,7 +266,6 @@ def cmd_setup(envs_py_path: str | None = None) -> None:
             end_idx += len(end_marker_str)
             updated = existing[:start] + new_block + existing[end_idx:]
         else:
-            # 找不到结束标记，追加
             updated = existing + new_block
         with open(config_file, "w", encoding="utf-8") as f:
             f.write(updated)
@@ -215,6 +282,7 @@ def cmd_setup(envs_py_path: str | None = None) -> None:
 
 
 def cmd_add(config: dict) -> None:
+    import getpass
     print(f"\n{BOLD}■ 添加新模型配置{RESET}\n")
 
     name = input("  模型名称（如 kimi、qwen、claude）: ").strip()
@@ -232,6 +300,20 @@ def cmd_add(config: dict) -> None:
     for var in env_vars:
         key = var["key"]
         required = var.get("required", False)
+
+        if key == "ANTHROPIC_AUTH_TOKEN":
+            # API Key 不经对话，用 getpass 隐藏输入后存入系统密钥库
+            api_key = getpass.getpass(f"  {key}（必填，输入不显示，存入系统密钥库）: ").strip()
+            if api_key:
+                try:
+                    _key_set(name, api_key)
+                    print(f"  {GREEN}✓ API Key 已安全存入系统密钥库{RESET}")
+                except RuntimeError as e:
+                    print(f"  {RED}✗ 密钥库写入失败：{e}{RESET}")
+            else:
+                print(f"  {YELLOW}⚠ API Key 未填写{RESET}")
+            continue
+
         hint = "(必填)" if required else "(可选，直接回车跳过)"
         value = input(f"  {key} {hint}: ").strip()
         if value:
@@ -246,6 +328,32 @@ def cmd_add(config: dict) -> None:
     config["models"].append(model)
     save_config(config)
     print(f"\n{GREEN}✓ 模型 '{name}' 添加成功{RESET}\n")
+
+
+def cmd_setkey(config: dict, name: str | None) -> None:
+    """为已有配置设置或更新 API Key（Key 不经过对话，直接存入系统密钥库）"""
+    import getpass
+    if not name:
+        _err("请指定模型名称，例如: envs setkey kimi")
+        return
+
+    if not find_model(config, name):
+        _err(f"模型 '{name}' 不存在，请先用 'envs import' 或 'envs add' 添加")
+        return
+
+    print(f"\n{BOLD}■ 设置 API Key：{name}{RESET}")
+    print(f"  {DIM}Key 将存入系统密钥库，不会出现在任何文件或对话记录中{RESET}\n")
+
+    api_key = getpass.getpass(f"  请输入 API Key（输入不显示）: ").strip()
+    if not api_key:
+        print(f"{RED}错误：Key 不能为空{RESET}")
+        return
+
+    try:
+        _key_set(name, api_key)
+        print(f"\n{GREEN}✓ API Key 已安全存入系统密钥库{RESET}\n")
+    except RuntimeError as e:
+        print(f"{RED}✗ 失败：{e}{RESET}")
 
 
 def cmd_use(config: dict, name: str | None, shell_mode: bool = False) -> None:
@@ -266,7 +374,11 @@ def cmd_use(config: dict, name: str | None, shell_mode: bool = False) -> None:
     if shell_mode:
         for var in env_vars:
             key = var["key"]
-            value = model.get(key, "")
+            if key == "ANTHROPIC_AUTH_TOKEN":
+                # 从密钥库读取，不从 JSON 读取
+                value = _key_get(name)
+            else:
+                value = model.get(key, "")
             if value:
                 escaped = value.replace("'", "'\\''")
                 print(f"export {key}='{escaped}'")
@@ -299,8 +411,10 @@ def cmd_list(config: dict) -> None:
         name = m["name"]
         model_str = m.get("ANTHROPIC_MODEL", "Default")
         desc = m.get("description", "")
+        has_key = bool(_key_get(name))
+        key_mark = f" {GREEN}🔑{RESET}" if has_key else f" {YELLOW}⚠ 无Key{RESET}"
         marker = f"{GREEN}●{RESET}" if name == current else " "
-        print(f"{marker} {name:<{name_w}} {model_str:<{model_w}} {DIM}{desc}{RESET}")
+        print(f"{marker} {name:<{name_w}} {model_str:<{model_w}} {DIM}{desc}{RESET}{key_mark}")
 
     print(f"\n  当前模型: {BOLD}{current or '(未选择)'}{RESET}\n")
 
@@ -313,8 +427,11 @@ def cmd_status(config: dict) -> None:
 
     if model:
         desc = model.get("description", "")
+        has_key = bool(_key_get(current_name))
+        key_status = f"{GREEN}✓ 已设置（存于系统密钥库）{RESET}" if has_key else f"{YELLOW}⚠ 未设置{RESET}"
         print(f"  当前模型:  {BOLD}{GREEN}{current_name}{RESET}" +
               (f"  {DIM}({desc}){RESET}" if desc else ""))
+        print(f"  API Key:   {key_status}")
     else:
         print(f"  当前模型:  {DIM}(未选择){RESET}")
 
@@ -324,7 +441,13 @@ def cmd_status(config: dict) -> None:
     for var in env_vars:
         key = var["key"]
         actual = os.environ.get(key, "")
-        if actual:
+        if key == "ANTHROPIC_AUTH_TOKEN":
+            if actual:
+                masked = actual[:4] + "****" + actual[-4:]
+                print(f"  {GREEN}✓{RESET}  {key:<28} {DIM}={RESET} {masked}  {DIM}(已脱敏){RESET}")
+            else:
+                print(f"  {DIM}✗  {key:<28} (未设置){RESET}")
+        elif actual:
             display = actual if len(actual) <= 24 else actual[:10] + "..." + actual[-6:]
             print(f"  {GREEN}✓{RESET}  {key:<28} {DIM}={RESET} {display}")
         else:
@@ -349,21 +472,25 @@ def cmd_remove(config: dict, name: str | None) -> None:
     if config.get("currentModel") == name:
         config["currentModel"] = None
     save_config(config)
-    print(f"{GREEN}✓ 已删除模型 '{name}'{RESET}")
+
+    # 同时从密钥库删除 API Key
+    _key_delete(name)
+
+    print(f"{GREEN}✓ 已删除模型 '{name}'（含密钥库中的 API Key）{RESET}")
 
 
 def cmd_template() -> None:
     print(f"""
 {BOLD}■ envs 配置模板{RESET}
 
-{DIM}将下面的内容连同你的 API 文档一起发给任意 AI，让它帮你填写：{RESET}
+{DIM}将下面的内容连同 API 文档链接一起发给 Claude，让它帮你填写（不需要提供 API Key）：{RESET}
 
 请根据下面的 JSON 格式和我提供的 API 文档，帮我填写配置。
-只需返回填好的 JSON，不需要其他解释。
+只需返回填好的 JSON（不要包含 API Key），不需要其他解释。
 
 {CYAN}{json.dumps(IMPORT_TEMPLATE, indent=2, ensure_ascii=False)}{RESET}
 
-{DIM}填好后，运行 'envs import' 并粘贴 AI 返回的 JSON 即可导入。{RESET}
+{DIM}填好后，运行 'envs import' 导入配置，再运行 'envs setkey <名称>' 安全输入 API Key。{RESET}
 """)
 
 
@@ -400,6 +527,8 @@ def cmd_import(config: dict, inline_json: str | None = None) -> None:
 
     imported = 0
     skipped = 0
+    needs_setkey = []
+
     for entry in models_to_import:
         if not isinstance(entry, dict):
             print(f"  {YELLOW}⚠ 跳过无效条目（非对象）{RESET}")
@@ -412,12 +541,24 @@ def cmd_import(config: dict, inline_json: str | None = None) -> None:
             skipped += 1
             continue
 
-        # 过滤掉模板占位文字
+        # 过滤模板占位文字
         model = {k: v for k, v in entry.items()
                  if not isinstance(v, str) or not any(
                      placeholder in v for placeholder in
                      ["模型别名", "API 的 base", "你的 API", "备注（可选）", "模型 ID（可选"]
                  )}
+
+        # 如果 JSON 中包含 API Key，存入密钥库后从 model dict 中移除
+        raw_key = model.pop("ANTHROPIC_AUTH_TOKEN", "").strip()
+        if raw_key:
+            try:
+                _key_set(name, raw_key)
+                print(f"  {DIM}(API Key 已转存至系统密钥库，不保存在配置文件中){RESET}")
+            except RuntimeError as e:
+                print(f"  {YELLOW}⚠ Key 存入密钥库失败（{e}），请稍后用 'envs setkey {name}' 补设{RESET}")
+                needs_setkey.append(name)
+        else:
+            needs_setkey.append(name)
 
         existing = find_model(config, name)
         if existing:
@@ -436,7 +577,14 @@ def cmd_import(config: dict, inline_json: str | None = None) -> None:
         imported += 1
 
     save_config(config)
-    print(f"\n  完成：导入 {imported} 个，跳过 {skipped} 个\n")
+    print(f"\n  完成：导入 {imported} 个，跳过 {skipped} 个")
+
+    if needs_setkey:
+        names = "、".join(needs_setkey)
+        print(f"\n  {YELLOW}⚠ 以下配置还没有 API Key，请在终端运行：{RESET}")
+        for n in needs_setkey:
+            print(f"     {BOLD}envs setkey {n}{RESET}")
+    print()
 
 
 def cmd_env(config: dict, args: list[str]) -> None:
@@ -499,25 +647,27 @@ def cmd_help() -> None:
   envs <命令> [参数]
 
 {BOLD}命令:{RESET}
-  {GREEN}setup{RESET}            自动检测 shell 并安装终端集成（首次使用）
-  {GREEN}add{RESET}              添加新的模型配置（交互式）
-  {GREEN}use <名称>{RESET}       切换到指定模型
-  {GREEN}list{RESET}             列出所有已配置的模型
-  {GREEN}status{RESET}           查看当前环境变量的实际值
-  {GREEN}remove <名称>{RESET}    删除一个模型配置
-  {GREEN}template{RESET}         打印可发给 AI 的配置模板
-  {GREEN}import{RESET}           粘贴 JSON 直接导入配置
-  {GREEN}env{RESET}              查看/管理环境变量列表
-  {GREEN}help{RESET}             显示此帮助
+  {GREEN}setup{RESET}              自动检测 shell 并安装终端集成（首次使用）
+  {GREEN}add{RESET}                添加新的模型配置（交互式，API Key 安全输入）
+  {GREEN}use <名称>{RESET}         切换到指定模型
+  {GREEN}setkey <名称>{RESET}      为已有配置设置/更新 API Key（存入系统密钥库）
+  {GREEN}list{RESET}               列出所有已配置的模型
+  {GREEN}status{RESET}             查看当前环境变量的实际值
+  {GREEN}remove <名称>{RESET}      删除一个模型配置（含密钥库中的 Key）
+  {GREEN}template{RESET}           打印可发给 AI 的配置模板（不含 Key）
+  {GREEN}import{RESET}             粘贴 JSON 直接导入配置（Key 自动转存密钥库）
+  {GREEN}env{RESET}                查看/管理环境变量列表
+  {GREEN}help{RESET}               显示此帮助
+
+{BOLD}安全说明:{RESET}
+  API Key 存储在系统密钥库（macOS Keychain / Linux SecretService / Windows Credential Manager）
+  配置文件 {DIM}~/.claude-code-env.json{RESET} 中不含任何 Key，可安全查看
 
 {BOLD}快速上手:{RESET}
-  1. envs setup         # 首次安装终端集成（之后开新终端生效）
-  2. 告诉 Claude 你的 API 信息，它会自动导入配置
-  3. 开新终端，直接使用
-
-{BOLD}提示:{RESET}
-  配置保存在 {DIM}~/.claude-code-env.json{RESET}
-  "登录模式"：不填 ANTHROPIC_AUTH_TOKEN 即可回落到 claude login 凭据
+  1. envs setup            # 首次安装终端集成
+  2. 告诉 Claude API 文档链接，它会自动导入配置（不需要提供 Key）
+  3. envs setkey <名称>    # 在终端安全输入 API Key
+  4. 开新终端，直接使用
 """)
 
 
@@ -556,7 +706,10 @@ def main() -> None:
                 env_vars = config.get("envVars", DEFAULT_ENV_VARS)
                 for var in env_vars:
                     key = var["key"]
-                    value = model.get(key, "")
+                    if key == "ANTHROPIC_AUTH_TOKEN":
+                        value = _key_get(current)
+                    else:
+                        value = model.get(key, "")
                     if value:
                         escaped = value.replace("'", "'\\''")
                         print(f"export {key}='{escaped}'")
@@ -580,6 +733,9 @@ def main() -> None:
     elif cmd == "use":
         name = args[1] if len(args) > 1 else None
         cmd_use(config, name, shell_mode=shell_mode)
+    elif cmd == "setkey":
+        name = args[1] if len(args) > 1 else None
+        cmd_setkey(config, name)
     elif cmd in ("list", "ls"):
         cmd_list(config)
     elif cmd == "status":
