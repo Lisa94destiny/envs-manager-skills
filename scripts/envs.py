@@ -41,8 +41,39 @@ IMPORT_TEMPLATE = {
     "name": "模型别名（如 kimi、qwen、glm）",
     "ANTHROPIC_BASE_URL": "API 的 base URL（如 https://api.siliconflow.cn/v1）",
     "ANTHROPIC_MODEL": "模型 ID（可选，如 moonshotai/Kimi-K2-Instruct）",
-    "description": "备注（可选）"
+    "description": "备注（可选）",
+    "verifiedWithClaudeCodeVersion": "已验证可用的 Claude Code 版本（可选，如 2.1.63）",
+    "docLink": "官方文档链接（可选）"
 }
+
+
+CHANGELOG_URL = "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md"
+
+
+# ── 版本工具 ──────────────────────────────────────────────────────────────────
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    """将 '2.1.63' 解析为 (2, 1, 63)，解析失败返回 (0,)"""
+    import re as _re
+    m = _re.search(r"(\d+)\.(\d+)\.(\d+)", v)
+    if m:
+        return tuple(int(x) for x in m.groups())
+    return (0,)
+
+
+def _get_claude_version() -> str | None:
+    """获取当前安装的 Claude Code 版本号，失败返回 None"""
+    try:
+        r = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True, text=True, timeout=5
+        )
+        output = r.stdout.strip() or r.stderr.strip()
+        import re as _re
+        m = _re.search(r"\d+\.\d+\.\d+", output)
+        return m.group(0) if m else None
+    except Exception:
+        return None
 
 
 # ── 系统密钥库（Keychain）────────────────────────────────────────────────────
@@ -339,6 +370,16 @@ def cmd_add(config: dict) -> None:
     if desc:
         model["description"] = desc
 
+    cc_ver = input("  已验证的 Claude Code 版本（可选，如 2.1.63）: ").strip()
+    if cc_ver:
+        model["verifiedWithClaudeCodeVersion"] = cc_ver
+        from datetime import date as _date
+        model["lastCheckedAt"] = str(_date.today())
+
+    doc = input("  官方文档链接（可选）: ").strip()
+    if doc:
+        model["docLink"] = doc
+
     config["models"].append(model)
     save_config(config)
     print(f"\n{GREEN}✓ 模型 '{name}' 添加成功{RESET}\n")
@@ -421,6 +462,8 @@ def cmd_list(config: dict) -> None:
     print(f"  {BOLD}{'NAME':<{name_w}} {'ANTHROPIC_MODEL':<{model_w}} 描述{RESET}")
     print(f"  {DIM}{'─' * (name_w + model_w + 20)}{RESET}")
 
+    cc_ver = _get_claude_version()
+
     for m in models:
         name = m["name"]
         model_str = m.get("ANTHROPIC_MODEL", "Default")
@@ -428,7 +471,17 @@ def cmd_list(config: dict) -> None:
         has_key = bool(_key_get(name))
         key_mark = f" {GREEN}🔑{RESET}" if has_key else f" {YELLOW}⚠ 无Key{RESET}"
         marker = f"{GREEN}●{RESET}" if name == current else " "
-        print(f"{marker} {name:<{name_w}} {model_str:<{model_w}} {DIM}{desc}{RESET}{key_mark}")
+
+        # 版本状态标记
+        verified_ver = m.get("verifiedWithClaudeCodeVersion", "")
+        if not verified_ver:
+            ver_mark = f"  {DIM}[未记录版本]{RESET}"
+        elif cc_ver and _parse_version(cc_ver) > _parse_version(verified_ver):
+            ver_mark = f"  {YELLOW}[验证于 v{verified_ver}，当前 v{cc_ver} ⚠]{RESET}"
+        else:
+            ver_mark = f"  {GREEN}[v{verified_ver} ✓]{RESET}"
+
+        print(f"{marker} {name:<{name_w}} {model_str:<{model_w}} {DIM}{desc}{RESET}{key_mark}{ver_mark}")
 
     print(f"\n  当前模型: {BOLD}{current or '(未选择)'}{RESET}\n")
 
@@ -601,6 +654,85 @@ def cmd_import(config: dict, inline_json: str | None = None) -> None:
     print()
 
 
+def cmd_verify(config: dict, name: str | None = None) -> None:
+    """检查模型配置与当前 Claude Code 版本的兼容性"""
+    cc_ver = _get_claude_version()
+    models = config.get("models", [])
+
+    print(f"\n{BOLD}■ 兼容性验证{RESET}\n")
+
+    if cc_ver:
+        print(f"  当前 Claude Code 版本: {BOLD}{cc_ver}{RESET}\n")
+    else:
+        print(f"  {YELLOW}⚠ 无法获取 Claude Code 版本（请确认 claude 命令可用）{RESET}\n")
+
+    targets = [m for m in models if m["name"] == name] if name else models
+    if not targets:
+        print(f"  {DIM}{'模型 ' + name + ' 不存在' if name else '暂无配置'}{RESET}\n")
+        return
+
+    has_warning = False
+
+    for m in targets:
+        mname = m["name"]
+        verified_ver = m.get("verifiedWithClaudeCodeVersion", "")
+        last_checked = m.get("lastCheckedAt", "")
+        doc_link = m.get("docLink", "")
+        desc = m.get("description", "")
+
+        label = f"{BOLD}{mname}{RESET}" + (f"  {DIM}({desc}){RESET}" if desc else "")
+
+        if not verified_ver:
+            print(f"  {DIM}?{RESET}  {label}")
+            print(f"     {DIM}未记录验证版本。运行 'envs verify-update {mname}' 记录当前版本。{RESET}")
+        elif cc_ver and _parse_version(cc_ver) > _parse_version(verified_ver):
+            has_warning = True
+            print(f"  {YELLOW}⚠{RESET}  {label}")
+            print(f"     验证于 v{verified_ver}，当前 v{cc_ver} — {YELLOW}版本已更新，建议核查兼容性{RESET}")
+            if last_checked:
+                print(f"     {DIM}上次检查: {last_checked}{RESET}")
+            if doc_link:
+                print(f"     文档:     {CYAN}{doc_link}{RESET}")
+        else:
+            status = f"v{verified_ver} ✓" if verified_ver else "✓"
+            print(f"  {GREEN}✓{RESET}  {label}")
+            print(f"     {DIM}验证版本: {verified_ver}" +
+                  (f"  |  上次检查: {last_checked}" if last_checked else "") + f"{RESET}")
+
+        print()
+
+    if has_warning:
+        print(f"  {YELLOW}存在版本更新，建议检查各 provider 的最新兼容性说明。{RESET}")
+        print(f"  Claude Code 变更日志: {CYAN}{CHANGELOG_URL}{RESET}")
+        print(f"  确认兼容后，运行 {BOLD}envs verify-update <名称>{RESET} 更新验证记录。\n")
+    else:
+        print(f"  {GREEN}所有已记录的配置均与当前版本匹配。{RESET}\n")
+
+
+def cmd_verify_update(config: dict, name: str | None) -> None:
+    """将指定模型的验证版本更新为当前 Claude Code 版本"""
+    if not name:
+        _err("请指定模型名称，例如: envs verify-update qwen-coder")
+        return
+
+    model = find_model(config, name)
+    if model is None:
+        _err(f"模型 '{name}' 不存在")
+        return
+
+    cc_ver = _get_claude_version()
+    if not cc_ver:
+        _err("无法获取当前 Claude Code 版本")
+        return
+
+    from datetime import date as _date
+    model["verifiedWithClaudeCodeVersion"] = cc_ver
+    model["lastCheckedAt"] = str(_date.today())
+    save_config(config)
+
+    print(f"\n{GREEN}✓ '{name}' 验证版本已更新为 v{cc_ver}（{model['lastCheckedAt']}）{RESET}\n")
+
+
 def cmd_reset(config: dict, shell_mode: bool = False) -> None:
     """清除当前模型选择，unset 所有 API 环境变量，退回 /login 登录模式"""
     config["currentModel"] = None
@@ -677,18 +809,20 @@ def cmd_help() -> None:
   envs <命令> [参数]
 
 {BOLD}命令:{RESET}
-  {GREEN}setup{RESET}              自动检测 shell 并安装终端集成（首次使用）
-  {GREEN}add{RESET}                添加新的模型配置（交互式，API Key 安全输入）
-  {GREEN}use <名称>{RESET}         切换到指定模型
-  {GREEN}reset{RESET}              {BOLD}清除当前模型，立即 unset 所有 API 环境变量（退回 /login 模式）{RESET}
-  {GREEN}setkey <名称>{RESET}      为已有配置设置/更新 API Key（存入系统密钥库）
-  {GREEN}list{RESET}               列出所有已配置的模型
-  {GREEN}status{RESET}             查看当前环境变量的实际值
-  {GREEN}remove <名称>{RESET}      删除一个模型配置（含密钥库中的 Key）
-  {GREEN}template{RESET}           打印可发给 AI 的配置模板（不含 Key）
-  {GREEN}import{RESET}             粘贴 JSON 直接导入配置（Key 自动转存密钥库）
-  {GREEN}env{RESET}                查看/管理环境变量列表
-  {GREEN}help{RESET}               显示此帮助
+  {GREEN}setup{RESET}                    自动检测 shell 并安装终端集成（首次使用）
+  {GREEN}add{RESET}                      添加新的模型配置（交互式，API Key 安全输入）
+  {GREEN}use <名称>{RESET}               切换到指定模型
+  {GREEN}reset{RESET}                    {BOLD}清除当前模型，立即 unset 所有 API 环境变量（退回 /login 模式）{RESET}
+  {GREEN}setkey <名称>{RESET}            为已有配置设置/更新 API Key（存入系统密钥库）
+  {GREEN}list{RESET}                     列出所有已配置的模型（含版本兼容状态）
+  {GREEN}status{RESET}                   查看当前环境变量的实际值
+  {GREEN}remove <名称>{RESET}            删除一个模型配置（含密钥库中的 Key）
+  {GREEN}verify [名称]{RESET}            检查模型配置与当前 Claude Code 版本的兼容性
+  {GREEN}verify-update <名称>{RESET}     将指定模型的验证版本更新为当前 Claude Code 版本
+  {GREEN}template{RESET}                 打印可发给 AI 的配置模板（不含 Key）
+  {GREEN}import{RESET}                   粘贴 JSON 直接导入配置（Key 自动转存密钥库）
+  {GREEN}env{RESET}                      查看/管理环境变量列表
+  {GREEN}help{RESET}                     显示此帮助
 
 {BOLD}安全说明:{RESET}
   API Key 存储在系统密钥库（macOS Keychain / Linux SecretService / Windows Credential Manager）
@@ -766,6 +900,12 @@ def main() -> None:
         cmd_use(config, name, shell_mode=shell_mode)
     elif cmd == "reset":
         cmd_reset(config, shell_mode=shell_mode)
+    elif cmd == "verify":
+        name = args[1] if len(args) > 1 else None
+        cmd_verify(config, name)
+    elif cmd == "verify-update":
+        name = args[1] if len(args) > 1 else None
+        cmd_verify_update(config, name)
     elif cmd == "setkey":
         name = args[1] if len(args) > 1 else None
         cmd_setkey(config, name)

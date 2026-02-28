@@ -24,13 +24,15 @@
 安装完成后，终端可直接使用 `envs` 命令：
 
 ```bash
-envs list                  # 查看所有配置及当前默认模型
-envs use <名称>             # 切换模型（当前终端立即生效）
-envs reset                 # 清除所有 API 环境变量，退回 /login 官方模式
-envs setkey <名称>          # 更新某个模型的 API Key
-envs status                # 查看当前终端实际生效的环境变量
-envs remove <名称>          # 删除一个模型配置
-envs help                  # 查看所有命令
+envs list                       # 查看所有配置及版本兼容状态
+envs use <名称>                  # 切换模型（当前终端立即生效）
+envs reset                      # 清除所有 API 环境变量，退回 /login 官方模式
+envs verify [名称]               # 检查模型与当前 Claude Code 版本的兼容性
+envs verify-update <名称>        # 将指定模型的验证版本更新为当前版本
+envs setkey <名称>               # 更新某个模型的 API Key
+envs status                     # 查看当前终端实际生效的环境变量
+envs remove <名称>               # 删除一个模型配置
+envs help                       # 查看所有命令
 ```
 
 ## 支持的 Provider
