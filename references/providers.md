@@ -25,8 +25,13 @@
 |---|---|
 | `https://coding.dashscope.aliyuncs.com/apps/anthropic` | `qwen3.5-plus` |
 
+> **⚠ 兼容性说明**：Claude Code 近期版本默认发送 `thinking: {type: "adaptive"}`，但此端点仅支持 `"enabled"` / `"disabled"`，会导致 `400 adaptive is not supported` 报错。
+> 需将 `CLAUDE_CODE_MAX_THINKING_TOKENS` 设为 `0` 来禁用 extended thinking。
+>
+> 若该变量不在管理列表中，先在终端运行：`envs env add CLAUDE_CODE_MAX_THINKING_TOKENS`
+
 ```json
-{"name":"qwen-coder","ANTHROPIC_BASE_URL":"https://coding.dashscope.aliyuncs.com/apps/anthropic","ANTHROPIC_AUTH_TOKEN":"sk-xxx","ANTHROPIC_MODEL":"qwen3.5-plus","description":"阿里百炼 Coding Plan"}
+{"name":"qwen-coder","ANTHROPIC_BASE_URL":"https://coding.dashscope.aliyuncs.com/apps/anthropic","ANTHROPIC_AUTH_TOKEN":"sk-xxx","ANTHROPIC_MODEL":"qwen3.5-plus","CLAUDE_CODE_MAX_THINKING_TOKENS":"0","description":"阿里百炼 Coding Plan"}
 ```
 
 ---

@@ -36,6 +36,35 @@ envs help                  # 查看所有命令
 
 详见 [references/providers.md](references/providers.md)，包含已验证可用于 Claude Code 的国内外主流服务商列表。
 
+## 常见问题
+
+### 报错 `400 adaptive is not supported`
+
+Claude Code 近期版本默认开启 extended thinking，会发送 `thinking: {type: "adaptive", ...}`，但阿里百炼（DashScope）等部分端点仅支持 `"enabled"` / `"disabled"`，不接受 `"adaptive"`。
+
+**解决方法**：将 `CLAUDE_CODE_MAX_THINKING_TOKENS` 设为 `0`：
+
+```bash
+envs env add CLAUDE_CODE_MAX_THINKING_TOKENS   # 添加到管理列表（只需一次）
+```
+
+然后在 `envs add` 或 `envs import` 时，将该变量填为 `0`。配置示例见 [providers.md](references/providers.md) 对应章节。
+
+### 报错 `403 invalid api-key / Please run /login`
+
+`ANTHROPIC_AUTH_TOKEN` 未正确设置，Claude Code 回退使用 `/login` 存储的 Anthropic 凭据，发往第三方端点后被拒绝。
+
+检查步骤：
+
+1. 运行 `envs setkey <名称>` 重新输入并保存 API Key
+2. 开新终端，运行 `envs status` 确认 `ANTHROPIC_AUTH_TOKEN` 已生效
+
+### 临时 `export` 与 autoload 是否冲突？
+
+不冲突。autoload 在终端启动时运行一次；之后在同一终端手动 `export` 会覆盖当前 session，不影响 `~/.claude-code-env.json` 中的默认配置，下个终端重新 autoload。
+
+若临时测试**支持 adaptive thinking 的官方 Claude**，记得手动 `unset CLAUDE_CODE_MAX_THINKING_TOKENS`。
+
 ## 安全说明
 
 API Key 存储在系统密钥库中，不出现在任何配置文件或对话记录里。通过 `envs setkey` 命令在终端直接输入（输入内容不显示），全程不经过 Claude。
