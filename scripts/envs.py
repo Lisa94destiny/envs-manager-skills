@@ -168,7 +168,7 @@ def _shell_function_content(shell: str, envs_py_path: str) -> str:
         return f"""
 # envs - Claude Code Env Manager
 envs() {{
-    if [[ "$1" == "use" ]]; then
+    if [[ "$1" == "use" || "$1" == "reset" ]]; then
         local _cmds
         _cmds="$(python3 '{p}' --shell "$@" 2>/dev/null)"
         local _exit=$?
@@ -177,7 +177,12 @@ envs() {{
             return $_exit
         fi
         eval "$_cmds"
-        echo "  \\033[32m✓ 已切换，当前终端环境变量已更新\\033[0m"
+        if [[ "$1" == "reset" ]]; then
+            echo "  \\033[32m✓ 已重置，当前终端 API 环境变量已全部清除\\033[0m"
+            echo "  \\033[2m下次开终端时 autoload 不再加载任何模型，Claude Code 将使用 /login 凭据\\033[0m"
+        else
+            echo "  \\033[32m✓ 已切换，当前终端环境变量已更新\\033[0m"
+        fi
     else
         python3 '{p}' "$@"
     fi
@@ -194,9 +199,13 @@ _envs_autoload
         return f"""
 # envs - Claude Code Env Manager
 function envs
-    if test "$argv[1]" = "use"
+    if test "$argv[1]" = "use" -o "$argv[1]" = "reset"
         python3 '{p}' --shell $argv | source
-        echo "  ✓ 已切换，当前终端环境变量已更新"
+        if test "$argv[1]" = "reset"
+            echo "  ✓ 已重置，当前终端 API 环境变量已全部清除"
+        else
+            echo "  ✓ 已切换，当前终端环境变量已更新"
+        end
     else
         python3 '{p}' $argv
     end
@@ -214,11 +223,15 @@ _envs_autoload
         return f"""
 # envs - Claude Code Env Manager
 function envs {{
-    if ($args[0] -eq 'use') {{
+    if ($args[0] -eq 'use' -or $args[0] -eq 'reset') {{
         $cmds = python3 '{p}' --shell @args 2>$null
         if ($LASTEXITCODE -eq 0) {{
             $cmds | Invoke-Expression
-            Write-Host "  ✓ 已切换，当前终端环境变量已更新" -ForegroundColor Green
+            if ($args[0] -eq 'reset') {{
+                Write-Host "  ✓ 已重置，当前终端 API 环境变量已全部清除" -ForegroundColor Green
+            }} else {{
+                Write-Host "  ✓ 已切换，当前终端环境变量已更新" -ForegroundColor Green
+            }}
         }} else {{
             python3 '{p}' --shell @args
         }}
@@ -254,7 +267,8 @@ def cmd_setup(envs_py_path: str | None = None) -> None:
         import re as _re
         m = _re.search(r"python3 '([^']+)' --autoload", existing)
         embedded_path = m.group(1) if m else ""
-        if embedded_path and Path(embedded_path).exists() and embedded_path == py_path:
+        func_up_to_date = '"reset"' in existing or "'reset'" in existing or "reset" in existing
+        if embedded_path and Path(embedded_path).exists() and embedded_path == py_path and func_up_to_date:
             print(f"  {YELLOW}⚠ 已安装过，跳过（路径有效）{RESET}\n")
             return
         # 路径无效或需要更新 → 替换旧块
@@ -587,6 +601,22 @@ def cmd_import(config: dict, inline_json: str | None = None) -> None:
     print()
 
 
+def cmd_reset(config: dict, shell_mode: bool = False) -> None:
+    """清除当前模型选择，unset 所有 API 环境变量，退回 /login 登录模式"""
+    config["currentModel"] = None
+    save_config(config)
+
+    env_vars = config.get("envVars", DEFAULT_ENV_VARS)
+
+    if shell_mode:
+        for var in env_vars:
+            print(f"unset {var['key']} 2>/dev/null; true")
+    else:
+        print(f"\n{GREEN}✓ 已重置{RESET}")
+        print(f"  {DIM}下次开终端时 autoload 不再加载任何模型{RESET}")
+        print(f"  {DIM}在当前终端立即清除，请运行：{BOLD}envs reset{RESET}{DIM}（需已安装终端集成）{RESET}\n")
+
+
 def cmd_env(config: dict, args: list[str]) -> None:
     if not args:
         env_vars = config.get("envVars", DEFAULT_ENV_VARS)
@@ -650,6 +680,7 @@ def cmd_help() -> None:
   {GREEN}setup{RESET}              自动检测 shell 并安装终端集成（首次使用）
   {GREEN}add{RESET}                添加新的模型配置（交互式，API Key 安全输入）
   {GREEN}use <名称>{RESET}         切换到指定模型
+  {GREEN}reset{RESET}              {BOLD}清除当前模型，立即 unset 所有 API 环境变量（退回 /login 模式）{RESET}
   {GREEN}setkey <名称>{RESET}      为已有配置设置/更新 API Key（存入系统密钥库）
   {GREEN}list{RESET}               列出所有已配置的模型
   {GREEN}status{RESET}             查看当前环境变量的实际值
@@ -733,6 +764,8 @@ def main() -> None:
     elif cmd == "use":
         name = args[1] if len(args) > 1 else None
         cmd_use(config, name, shell_mode=shell_mode)
+    elif cmd == "reset":
+        cmd_reset(config, shell_mode=shell_mode)
     elif cmd == "setkey":
         name = args[1] if len(args) > 1 else None
         cmd_setkey(config, name)
